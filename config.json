@@ -1,0 +1,5 @@
+{
+  "Addr": ":8081",
+  "RequestTimeout": 3000,
+  "TargetAddr": "https://places.aviasales.ru"
+}
