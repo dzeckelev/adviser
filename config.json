@@ -1,5 +1,6 @@
 {
   "Addr": ":8081",
+  "CacheSize": 1000,
   "LogLevel": "debug",
   "RequestTimeout": 3000,
   "TargetAddr": "https://places.aviasales.ru"

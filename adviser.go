@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/hashicorp/golang-lru"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -58,6 +59,7 @@ type outputItem struct {
 // server is a http server.
 type server struct {
 	debug         bool
+	cache         *lru.Cache
 	httpServer    *http.Server
 	logger        *zap.SugaredLogger
 	reqTimeout    time.Duration
@@ -67,6 +69,7 @@ type server struct {
 // config is an application configuration.
 type config struct {
 	Addr           string
+	CacheSize      int
 	LogLevel       string
 	RequestTimeout uint64 // In milliseconds.
 	TargetAddr     string
@@ -76,6 +79,7 @@ type config struct {
 func newConfig() *config {
 	return &config{
 		Addr:           ":80",
+		CacheSize:      1000,
 		LogLevel:       "info",
 		RequestTimeout: 3000,
 		TargetAddr:     "https://places.aviasales.ru",
@@ -97,6 +101,9 @@ func readConfig(name string, data interface{}) error {
 
 func (s *server) request(ctx context.Context, logger *zap.SugaredLogger,
 	url string, timeout time.Duration, result interface{}) error {
+
+	// With target hostname.
+	url = s.targetAddress + url
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -137,7 +144,8 @@ func (s *server) request(ctx context.Context, logger *zap.SugaredLogger,
 	return nil
 }
 
-func newServer(logger *zap.SugaredLogger, cfg *config) *server {
+func newServer(
+	logger *zap.SugaredLogger, cache *lru.Cache, cfg *config) *server {
 	var debug bool
 
 	if cfg.LogLevel == "debug" || cfg.LogLevel == "DEBUG" {
@@ -146,6 +154,7 @@ func newServer(logger *zap.SugaredLogger, cfg *config) *server {
 
 	srv := &server{
 		debug:         debug,
+		cache:         cache,
 		httpServer:    &http.Server{Addr: cfg.Addr},
 		logger:        logger,
 		reqTimeout:    time.Duration(cfg.RequestTimeout) * time.Millisecond,
@@ -197,7 +206,13 @@ func (s *server) handler(logger *zap.SugaredLogger, ctx context.Context,
 		}
 	}
 
-	result, err := json.Marshal(output)
+	s.push(url, output)
+	s.response(logger, w, output)
+}
+
+func (s *server) response(logger *zap.SugaredLogger,
+	w http.ResponseWriter, data interface{}) {
+	result, err := json.Marshal(data)
 	if err != nil {
 		logger.Error(err)
 		return
@@ -209,19 +224,38 @@ func (s *server) handler(logger *zap.SugaredLogger, ctx context.Context,
 	}
 }
 
+func (s *server) pullAndResponse(key string, w http.ResponseWriter) bool {
+	val, found := s.cache.Get(key)
+	if !found {
+		return false
+	}
+
+	data, ok := val.(outputResp)
+	if !ok {
+		return false
+	}
+
+	s.response(s.logger, w, data)
+
+	return true
+}
+
+func (s *server) push(url string, data interface{}) {
+	s.cache.Add(url, data)
+}
+
 // handlerFunc processes requests.
 func (s *server) handlerFunc(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(),
 		time.Duration(s.reqTimeout)*time.Millisecond)
 	defer cancel()
 
-	// Makes target url.
-	url := s.targetAddress + r.URL.String()
-
-	logger := s.logger.With(urlStr, url)
-
 	// Adds "Content-Type" = "application/json".
 	s.addJSONContentType(w)
+
+	url := r.URL.String()
+
+	logger := s.logger.With(urlStr, url)
 
 	// Logs the time to process a request.
 	if s.debug {
@@ -232,6 +266,11 @@ func (s *server) handlerFunc(w http.ResponseWriter, r *http.Request) {
 			logger.With(processingTime,
 				stop.Sub(start).String()).Debug(request)
 		}()
+	}
+
+	// Pull out of the cache.
+	if s.pullAndResponse(url, w) {
+		return
 	}
 
 	done := make(chan struct{})
@@ -282,8 +321,12 @@ func main() {
 
 	logger = logger.With("config", cfg)
 
-	err := newServer(logger, cfg).listenAndServe()
+	cache, err := lru.New(cfg.CacheSize)
 	if err != nil {
+		logger.Fatal(err)
+	}
+
+	if err = newServer(logger, cache, cfg).listenAndServe(); err != nil {
 		logger.Fatal(err)
 	}
 }
