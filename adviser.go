@@ -95,10 +95,8 @@ func readConfig(name string, data interface{}) error {
 	return json.NewDecoder(file).Decode(data)
 }
 
-func (s *server) request(logger *zap.SugaredLogger, url string,
-	timeout time.Duration, result interface{}) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+func (s *server) request(ctx context.Context, logger *zap.SugaredLogger,
+	url string, timeout time.Duration, result interface{}) error {
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -167,34 +165,20 @@ func (s *server) addJSONContentType(w http.ResponseWriter) {
 	w.Header().Add(contentType, applicationJSON)
 }
 
-// handlerFunc processes requests.
-func (s *server) handlerFunc(w http.ResponseWriter, r *http.Request) {
-	// Makes target url.
-	url := s.targetAddress + r.URL.String()
-	logger := s.logger.With(urlStr, url)
-
-	// Adds "Content-Type" = "application/json".
-	s.addJSONContentType(w)
-
-	// Logs the time to process a request.
-	if s.debug {
-		start := time.Now()
-		defer func() {
-			stop := time.Now()
-
-			logger.With(processingTime,
-				stop.Sub(start).String()).Debug(request)
-		}()
-	}
+func (s *server) handler(logger *zap.SugaredLogger, ctx context.Context,
+	url string, done chan struct{}, w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}()
 
 	// Receives a response from the target service.
 	input := inputResp{}
-	if err := s.request(logger, url,
+	if err := s.request(ctx, logger, url,
 		s.reqTimeout*time.Millisecond, &input); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		if _, err := w.Write(internalErr); err != nil {
-			logger.Error(err)
-		}
+		_, _ = w.Write(internalErr)
 		return
 	}
 
@@ -216,12 +200,48 @@ func (s *server) handlerFunc(w http.ResponseWriter, r *http.Request) {
 	result, err := json.Marshal(output)
 	if err != nil {
 		logger.Error(err)
-		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	if _, err := w.Write(result); err != nil {
+	_, err = w.Write(result)
+	if err != nil {
 		logger.Error(err)
+	}
+}
+
+// handlerFunc processes requests.
+func (s *server) handlerFunc(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(),
+		time.Duration(s.reqTimeout)*time.Millisecond)
+	defer cancel()
+
+	// Makes target url.
+	url := s.targetAddress + r.URL.String()
+
+	logger := s.logger.With(urlStr, url)
+
+	// Adds "Content-Type" = "application/json".
+	s.addJSONContentType(w)
+
+	// Logs the time to process a request.
+	if s.debug {
+		start := time.Now()
+		defer func() {
+			stop := time.Now()
+
+			logger.With(processingTime,
+				stop.Sub(start).String()).Debug(request)
+		}()
+	}
+
+	done := make(chan struct{})
+	go s.handler(logger, ctx, url, done, w, r)
+
+	select {
+	case <-ctx.Done():
+		w.WriteHeader(http.StatusGatewayTimeout)
+		_, _ = w.Write(internalErr)
+	case <-done:
 	}
 }
 
