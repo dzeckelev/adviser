@@ -174,7 +174,7 @@ func (s *server) addJSONContentType(w http.ResponseWriter) {
 	w.Header().Add(contentType, applicationJSON)
 }
 
-func (s *server) handler(logger *zap.SugaredLogger, ctx context.Context,
+func (s *server) handler(ctx context.Context, logger *zap.SugaredLogger,
 	url string, done chan struct{}, w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		select {
@@ -274,7 +274,7 @@ func (s *server) handlerFunc(w http.ResponseWriter, r *http.Request) {
 	}
 
 	done := make(chan struct{})
-	go s.handler(logger, ctx, url, done, w, r)
+	go s.handler(ctx, logger, url, done, w, r)
 
 	select {
 	case <-ctx.Done():
