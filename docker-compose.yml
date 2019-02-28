@@ -1,0 +1,10 @@
+version: "3.7"
+
+services:
+  adviser:
+    build:
+      context: .
+    ports:
+      - "8081:8081"
+    container_name: adviser
+    command: adviser
